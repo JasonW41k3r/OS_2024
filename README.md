@@ -60,4 +60,4 @@ If you have any questions or suggestions, feel free to reach out to me:
 如果您有任何问题或建议,欢迎通过以下方式与我联系:
 
 - 邮箱: raojsh@mail2.sysu.edu.com
-- GitHub: [https://github.com/your-username/os-notes](https://github.com/JasonW41k3r/OS_2024)
+- GitHub: https://github.com/JasonW41k3r/OS_2024
