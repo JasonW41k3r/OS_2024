@@ -1260,3 +1260,1513 @@ x = x + 1; // or whatever your critical section is
 pthread_mutex_unlock(&lock); 
 ```
 
+两种初始化锁的方法：
+
+1. 使用`PTHREAD_MUTEX_INITIALIZER`，这会将锁设置为默认值，使得锁可用
+
+    ```c
+     pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    ```
+
+2. 使用`pthread_mutex_init()`
+    ```c
+    int rc = pthread_mutex_init(&lock, NULL); 
+    assert(rc == 0); // always check success! 
+    ```
+
+    第一个参数是锁本身的地址，第二个参数是可选属性，NULL表示使用默认值
+
+    *注意：当用完锁时，应该相应调用`pthread_mutex_destroy()`以释放锁*
+
+其他用于获取锁的函数：
+```c
+int pthread_mutex_trylock(pthread_mutex_t *mutex); 
+int pthread_mutex_timedlock(pthread_mutex_t *mutex, struct timespec *abs_timeout);
+```
+
+`pthread_mutex_trylock()`：跟`pthread_mutex_lock()`的区别是前者只是尝试，若失败会立马返回，而后者需要达到成功lock的目的才会返回
+`pthread_mutex_timedlock()`：在trylock的基础上加上时间限制
+
+ ## 27.4 条件变量
+
+等待：线程等待通常与条件有关。例如，一个线程可能需要等待某个特定条件满足（如某个数据变为可用或某个事件发生）才能继续执行。在等待条件变量时，线程会释放它持有的锁（以允许其他线程改变这个条件），并进入等待状态。在这种状态下，线程同样不会执行任何操作，不消耗 CPU 资源，直到它被明确地通知（唤醒）条件已经满足。
+
+阻塞：当一个线程尝试执行一个不能立即进行的操作时（如等待数据输入、文件访问或获取已被其他线程锁定的互斥锁），它会进入阻塞状态。在阻塞状态下，线程不会执行任何操作，也不会消耗 CPU 资源，它会在系统的调度列表中标记为非活动状态，直到它等待的事件（如互斥锁被释放）发生。
+
+唤醒：当线程在等待一个条件时，一旦条件满足（比如另一个线程修改了条件并通知等待中的线程），等待的线程将被唤醒。这通常是通过调用特定的唤醒函数完成的，如 `pthread_cond_signal()` 或 `pthread_cond_broadcast()`。被唤醒的线程会再次变成活跃状态，尝试重新获取之前释放的锁，一旦获取成功，它就可以继续执行后续的操作。
+
+等待和阻塞的区别：等待是通过条件变量主动控制的结果，阻塞是由于操作系统资源调度，线程需要的资源被占用而被动进入的状态，通常不是程序员编程或设计的结果
+
+cond条件变量：可以视为一个用于同步的队列的标识符。cond是一个同步工具，管理着一个等待队列
+
+一个典型的条件变量多线程代码：
+```c
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;  
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER; 
+Pthread_mutex_lock(&lock);  
+while (ready == 0) 
+    Pthread_cond_wait(&cond, &lock);  
+Pthread_mutex_unlock(&lock); 
+```
+
+第三行：用于获取操作相关临界区变量的锁（比如这里的ready变量）
+
+第四至五行：用于周期性轮询相关变量的情况。在这段代码中，若ready一直为0，则周期性调用`Pthread_cond_wait()`函数，这个函数释放当前线程锁，并将当前线程加入cond标识符对应的等待队列中，此时其他线程可以修改ready。待其他线程修改ready后，需要其他线程调用`Pthread_cond_signal(&cond)`函数唤醒当前线程并释放锁，当前线程获得锁并继续后面的操作
+
+`Pthread_cond_wait()`函数的功能：自动释放锁并让当前进程进入休眠，自动获取锁并恢复当前进程
+
+一个典型的唤醒函数代码大概长这样：
+```c
+Pthread_mutex_lock(&lock);  
+ready = 1;  
+Pthread_cond_signal(&cond);  
+Pthread_mutex_unlock(&lock); 
+```
+
+# CH28 锁
+
+## 28.1 基本思想
+
+锁的本质：一个变量，保存了锁在某一时刻的状态（可用：available/unlocked/free，占用：acquired/locked/held）
+
+`lock()`：尝试获取锁。若没有线程持有锁，则该线程获得锁并进入临界区。此时该线程称为锁的持有者（owner）
+
+`unlock()`：锁的持有者调用unlock后，锁会立马可用。若有等待线程（即被lock阻塞），则其中一个线程会注意到锁状态的变化，获得该锁并进入临界区
+
+## 28.2 Pthread锁：mutex
+
+POSIX库称锁为互斥量（mutex，用于提供线程之间的互斥）
+
+粗粒度锁策略：任何临界区使用一个大锁
+
+细粒度锁策略：不同的锁保护不同的数据结构
+
+## 28.4锁的评价
+
+1. 有效性：是否可以互斥地让线程进入临界区
+2. 公平性：当锁可用时，是否每一个竞争的线程（等待队列上的线程）都有公平的机会可以获得锁/是否有竞争锁的线程会一直无法获得锁
+3. 性能：使用锁之后增加的时间开销
+
+## 28.5 控制中断
+
+这是最早的互斥解决方案之一：在临界区关闭中断，即运行临界区的代码的时候不会产生中断
+
+加锁和解锁的代码如下：
+```c
+void lock() { 
+    DisableInterrupts(); 
+} 
+void unlock() { 
+    EnableInterrupts(); 
+} 
+```
+
+缺点：
+
+1. 相关线程必须被允许执行特权操作（打开和关闭中断），这种信任机制可能会导致非预期情况发生。贪婪的程序可能通过调用`lock()`独占处理器
+2. 该方案不支持多处理器。若两个处理器分别进入临界区，中断也无法解决竞态
+3. 关闭中断可能导致中断丢失，比如硬件中断错误，导致操作系统无法唤醒调用硬件的进程
+4. 效率低下，CPU对打开/关闭中断的代码执行速度慢
+
+综上所述，在临界区关闭中断来解决互斥问题的方案只有在操作系统内部才会使用。有些操作系统本身会采取屏蔽中断的方式保证访问操作系统内部数据结构的原子性。
+
+## Peterson算法（软件级互斥）
+
+```c
+int flag[2]; 
+int turn; 
+ 
+void init() { 
+    flag[0] = flag[1] = 0;      // 1->thread wants to grab lock 
+    turn = 0;                   // whose turn? (thread 0 or 1?) 
+} 
+void lock() { 
+    flag[self] = 1;             // self: thread ID of caller 
+    turn = 1 - self;            // make it other thread's turn 
+    while ((flag[1-self] == 1) && (turn == 1 - self)) 
+        ; // spin-wait 
+} 
+void unlock() { 
+    flag[self] = 0;             // simply undo your intent 
+} 
+```
+
+`turn`：当前获得访问临界区权力的线程ID，分为0和1
+
+`flag[i]`数组：标记两个线程是否申请进入临界区操作，若`flag[i] = 1`说明ID为 i 的线程申请访问临界区，或者已经进入临界区
+
+缺点：使用自旋操作忙等，造成效率低下
+
+## 28.6 锁的硬件支持：测试并设置指令
+
+测试并设置指令（test-and-set instruction）也叫做原子交换（atomic exchange），是对锁的一种简单硬件支持
+
+如果尝试使用软件支持锁（即不依赖硬件的锁），需要用一个变量标记锁的持有状态，如下所示
+```c
+1    typedef struct  lock_t { int flag; } lock_t; 
+2 
+3    void init(lock_t *mutex) { 
+4        // 0 -> lock is available, 1 -> held 
+5        mutex->flag = 0; 
+6    } 
+7 
+8    void lock(lock_t *mutex) { 
+9        while (mutex->flag == 1) // TEST the flag 
+10           ; // spin-wait (do nothing) 
+11       mutex->flag = 1;         // now SET it! 
+12   } 
+13 
+14   void unlock(lock_t *mutex) { 
+15       mutex->flag = 0; 
+16   } 
+```
+
+但上面的实现具有显著的正确性错误：可以构造出一种情形使得两个线程的flag都为1（都能进入临界区），如下图所示
+<img src="./assets/image-20240511142624154.png" alt="image-20240511142624154" style="zoom:67%;" />
+
+此外，等待线程的策略采用了自旋策略，会带来显著的性能开销
+
+## 28.7 自旋锁
+
+自旋：指等待线程在flag未修改前执行无限while循环的状态
+
+可以将自旋指令`while(){}`视为一个只允许一个人进入的门，置于其后的代码只能有一个线程进入
+
+测试并设置指令定义：
+```c
+1    int TestAndSet(int *old_ptr, int new) { 
+2        int old = *old_ptr; // fetch old value at old_ptr 
+3        *old_ptr = new;    // store 'new' into old_ptr 
+4        return old;        // return the old value 
+5    } 
+```
+
+测试并设置指令：将旧指针值设置为新值，并返回旧指针值
+
+SPARC: ldstub（load-store unsigned byte），x86：xchg（atomic exchange）
+
+利用测试并设置指令的自旋锁：
+```c
+1    typedef struct  lock_t { 
+2        int flag; 
+3    } lock_t; 
+4 
+5    void init(lock_t *lock) { 
+6        // 0 indicates that lock is available, 1 that it is held 
+7        lock->flag = 0; 
+8    } 
+9  
+10   void lock(lock_t *lock) { 
+11       while (TestAndSet(&lock->flag, 1) == 1) 
+12           ; // spin-wait (do nothing) 
+13   } 
+14  
+15   void unlock(lock_t *lock) { 
+16       lock->flag = 0; 
+17   } 
+```
+
+`while (TestAndSet(&lock->flag, 1) == 1)`：核心语句
+
+1. 若flag = 0（没有其他线程占用锁），`TestAndSet(&lock->flag, 1)`使flag为1并返回0，于是跳出循环，一次取锁成功（flag由0变1）
+2. 若flag = 1（另一个线程正用锁），`TestAndSet(&lock->flag, 1)`不对flag做修改（持续返回1），于是进入循环语句自旋，直到flag由1变0（由另一个线程通过unlock操作实现）
+
+自旋锁必须在运行抢占式调度器的CPU上运行，否则无法跳出自旋（线程永久占用CPU）
+
+## 28.8 评价自旋锁
+
+1. 正确性：自旋锁是正确的锁，一次只允许一个线程进入临界区
+2. 公平性：不提供任何公平性保证，不保证任何等待线程会进入临界区。自旋的线程在竞态下可能永远自旋，被饿死
+3. 性能：
+    在单CPU上性能开销大，在放弃CPU前，不持有锁的线程都会自旋一个CPU时间片；
+    在多CPU上性能不错，因为自旋会在各自的CPU周期内同步发生
+
+## 28.9 比较并交换指令
+
+比较并交换指令原语也可以替代测试并设置指令实现自旋锁：
+```c
+1    int CompareAndSwap(int *ptr, int expected, int new) { 
+2        int actual = *ptr; 
+3        if (actual == expected) 
+4            *ptr = new; 
+5        return actual; 
+6    } 
+```
+
+比较并交换指令：检测ptr指向的值是否和expected相等；如果是，更新ptr所 指的值为新值。否则，什么也不做。
+
+使用比较并交换指令的自旋锁：
+```c
+1    void lock(lock_t *lock) { 
+2        while (CompareAndSwap(&lock->flag, 0, 1) == 1) 
+3            ; // spin 
+4    } 
+```
+
+## 28.10 链接式加载（LL）和条件式存储（SC）指令
+
+用于临界区的一对指令，常用于MIPS架构。指令伪代码长这样：
+```c
+1    int LoadLinked(int *ptr) { 
+2        return *ptr; 
+3    } 
+4 
+5    int StoreConditional(int *ptr, int value) { 
+6        if (no one has updated *ptr since the LoadLinked to this address){ 
+7            *ptr = value; 
+8            return 1; // success! 
+9        } else { 
+10           return 0; // failed to update 
+11       } 
+12   } 
+```
+
+使用LL/SC指令的自旋锁实现：
+```c
+1    void lock(lock_t *lock) { 
+2        while (1) { 
+3            while (LoadLinked(&lock->flag) == 1) 
+4                ; // spin until it's zero 
+5            if (StoreConditional(&lock->flag, 1) == 1) 
+6                return; // if set-it-to-1 was a success: all done 
+7                        // otherwise: try it all over again 
+8        } 
+9    } 
+10 
+11   void unlock(lock_t *lock) { 
+12       lock->flag = 0; 
+13   } 
+```
+
+TIPS：劳尔定律——代码越少越好
+
+一种更加简洁的实现
+
+```c
+1    void lock(lock_t *lock) { 
+2      while (LoadLinked(&lock->flag)||!StoreConditional(&lock->flag, 1)) 
+3        ; // spin 
+4    } 
+```
+
+## 28.11 获取并增加指令
+
+获取并增加指令：返回特定地址的旧值，并让该值自增1
+
+实现如下：
+```c
+1    int FetchAndAdd(int *ptr) { 
+2        int old = *ptr; 
+3        *ptr = old + 1; 
+4        return old; 
+5    }
+```
+
+使用获取并增加指令的自旋锁实现：
+
+`````c
+1    typedef struct  lock_t { 
+2        int ticket; 
+3        int turn; 
+4    } lock_t; 
+5 
+6    void lock_init(lock_t *lock) { 
+7        lock->ticket = 0; 
+8        lock->turn   = 0; 
+9    } 
+10 
+11   void lock(lock_t *lock) { 
+12       int myturn = FetchAndAdd(&lock->ticket); 
+13       while (lock->turn != myturn) 
+14           ; // spin 
+15   } 
+16 
+17   void unlock(lock_t *lock) { 
+18       FetchAndAdd(&lock->turn); 
+19   } 
+`````
+
+实现思想：给每个线程分配一个次序编号，调度程序决定每次执行哪个编号的线程。
+
+ticket：待分配的次序编号
+turn：调度系统预期执行的线程编号
+
+每次执行lock，使当前线程的线程编号为ticket分配的编号，并让ticket自增1，若turn为当前编号则退出自旋，执行线程
+
+使用获取并增加原语的自旋锁的优点：能保证每个线程都可以按顺序获得锁，具有公平性
+
+## 28.12 自旋过多及解决
+
+基于硬件的自旋锁的缺点是，会导致很多线程陷入自旋等待持有锁的线程释放锁。在单CPU机器上，若N个线程竞争一个锁，会浪费 N-1 个时间片用于自旋并等待线程释放锁
+
+操作系统的支持可以解决不必要的自旋浪费CPU时间的问题。
+
+一种解决方案：在要自旋的时候，放弃CPU
+代码实现：
+
+```c
+1    void init() { 
+2        flag = 0; 
+3    } 
+4 
+5    void lock() { 
+6        while (TestAndSet(&flag, 1) == 1) 
+7            yield(); // give up the CPU 
+8    } 
+9 
+10   void unlock() { 
+11       flag = 0; 
+12   } 
+```
+
+`yield()`原语：系统调用，令线程从运行态变为就绪态，从而让其他线程可以执行。本质为线程取消自己的调度。仍然存在成本，需要进行上下文切换；没有解决饿死的问题（一个线程反复放弃CPU而不能被执行）但比自旋方案好。
+
+## 28.14 队列：休眠替代自旋
+
+前面方法的局限性：存在偶然性，由调度线程决定如何调度，可能导致资源浪费或者线程饿死
+
+需要显式施加控制，在锁释放时所有线程都能抢到锁：需要一个队列保存所有等待锁的线程
+
+利用Solaris系统调用：`park(tID)`和`unpark(tID)`可以让指定线程ID休眠和唤醒，让调用者在获取不到锁时休眠，在锁可用时被唤醒。
+
+代码实现：
+```c
+1    typedef struct  lock_t { 
+2        int flag; 
+3        int guard; 
+4        queue_t *q; 
+5    } lock_t; 
+6 
+7    void lock_init(lock_t *m) { 
+8        m->flag = 0; 
+9        m->guard = 0; 
+10       queue_init(m->q); 
+11   } 
+12 
+13   void lock(lock_t *m) { 
+14       while (TestAndSet(&m->guard, 1) == 1) 
+15           ; //acquire guard lock by spinning 
+16       if (m->flag == 0) { 
+17           m->flag = 1; // lock is acquired 
+18           m->guard = 0; 
+19       } else { 
+20           queue_add(m->q, gettid()); 
+21           m->guard = 0; 
+22           park(); 
+23       } 
+24   } 
+25 
+26   void unlock(lock_t *m) { 
+27       while (TestAndSet(&m->guard, 1) == 1) 
+28           ; //acquire guard lock by spinning 
+29       if (queue_empty(m->q)) 
+30           m->flag = 0; // let go of lock; no one wants it 
+31       else 
+32           unpark(queue_remove(m->q)); // hold lock (for next thread!) 
+33       m->guard = 0; 
+```
+
+优点：虽然使用了自旋，但是是局部自旋（只在`lock`和`unlock`中局部自旋，时间很短），因此自旋时间是有限的
+
+缺点：如果在线程准备park的时候切换到持有锁的线程，并且有锁线程随后释放锁，可能导致等待线程一直休眠
+
+解决方案：
+
+1. 利用Solaris系统调用`setpark()`，该系统调用用于线程表面自己马上要park，若此时另一个线程被调度且调用unpark，则调用`setpark()`的线程在park时会直接返回，而不是休眠
+2. 将guard传入内核，内核能够采取措施保证原子释放锁并将线程移出队列
+
+## 28.15 其他操作系统的锁实现
+
+### Linux
+
+`futex`接口：类似于Solaris的接口，但提供更多内核功能。每个futex关联特定物理内存并关联事先建好的内核队列，通过`futex_wait(addr, expected)`和`futex_wake(addr)`睡眠或者唤醒线程。
+
+`futex_wait(addr, expected)`：若`*addr = expected`则使该线程睡眠，否则该调用立刻返回
+
+`futex_wake(addr)`：唤醒等待队列中的一个线程
+
+Linux锁的代码实现（`nptl`库的`lowlevellock.h`）：
+```c
+1    void mutex_lock (int *mutex) { 
+2      int v; 
+3      /* Bit 31 was clear, we got the mutex (this is the fastpath) */ 
+4      if (atomic_bit_test_set (mutex, 31) == 0) 
+5        return; 
+6      atomic_increment (mutex); 
+7      while (1) { 
+8          if (atomic_bit_test_set (mutex, 31) == 0) { 
+9              atomic_decrement (mutex); 
+10             return; 
+11         } 
+12         /* We have to wait now. First make sure the futex value 
+13            we are monitoring is truly negative (i.e. locked). */ 
+14         v = *mutex; 
+15         if (v >= 0) 
+16           continue; 
+17         futex_wait (mutex, v); 
+18     } 
+19   } 
+20 
+21   void mutex_unlock (int *mutex) { 
+22     /* Adding 0x80000000 to the counter results in 0 if and only if 
+23       there are not other interested threads */ 
+24     if (atomic_add_zero (mutex, 0x80000000)) 
+25       return; 
+26 
+27     /* There are other threads waiting for this mutex, 
+28        wake one of them up. */ 
+29     futex_wake (mutex); 
+```
+
+利用了一个整数同时记录锁是否被持有（该整数最高位）以及等待者个数（整数的其余位），并且针对常见情况进行优化（如没有竞争时， 只有一个线程获取和释放锁）
+
+## 28.16 两阶段锁
+
+Linux采用的锁解决方案：`Dahm`锁（1960年代），也成为两阶段锁（two-phase lock）。这种锁意识到自旋的作用。
+
+第一阶段：先将调用线程自旋一段时间，希望该线程可以获得锁
+
+第二阶段：调用者睡眠，直到锁可用。
+
+常见方式：在循环中自旋固定的次数，然后调用`futex`睡眠。两阶段锁是一种混合方案（hybrid）
+
+# CH29 基于锁的并发数据结构
+
+在数据结构当中使用锁可以增加数据结构的线程安全性。
+
+## 29.1 并发计数器
+
+并发计数器是一种跨线程计数的数据结构，如果无锁会导致线程冲突
+
+一种无锁的计数器实现：
+```c
+1    typedef struct  counter_t { 
+2        int value; 
+3    } counter_t; 
+4 
+5    void init(counter_t *c) { 
+6        c->value = 0; 
+7    } 
+8 
+9    void increment(counter_t *c) { 
+10       c->value++; 
+11   } 
+12 
+13   void decrement(counter_t *c) { 
+14       c->value--; 
+15   } 
+16 
+17   int get(counter_t *c) { 
+18       return c->value; 
+19   } 
+```
+
+加锁计数器实现：
+```c
+1    typedef struct  counter_t { 
+2        int            value; 
+3        pthread_mutex_t lock; 
+4    } counter_t; 
+5 
+6    void init(counter_t *c) { 
+7        c->value = 0; 
+8        Pthread_mutex_init(&c->lock,  NULL); 
+9    } 
+10 
+11   void increment(counter_t *c) { 
+12       Pthread_mutex_lock(&c->lock); 
+13       c->value++; 
+14       Pthread_mutex_unlock(&c->lock); 
+15   } 
+16 
+17   void decrement(counter_t *c) { 
+18       Pthread_mutex_lock(&c->lock); 
+19       c->value--; 
+20       Pthread_mutex_unlock(&c->lock); 
+21   } 
+22 
+23   int get(counter_t *c) { 
+24       Pthread_mutex_lock(&c->lock); 
+25       int rc = c->value; 
+26       Pthread_mutex_unlock(&c->lock); 
+27       return rc; 
+28   } 
+```
+
+加锁后，在调用该数据结构时获取锁，从调用返回时释放锁
+
+这种加锁方式的计数器扩展性不好，线程越多性能越差。
+
+理想情况下，多处理器运行的多线程程序跟单线程一样快，这种状态称为**完美扩展**（perfect scaling）
+
+可扩展性：某种并发数据结构是否在各种线程数上都可以以优秀的性能运行
+
+### 可扩展计数器：懒惰计数器
+
+可扩展计数器非常重要，若无法实现好的可扩展计数器，Linux工作在多核机器上会有严重扩展问题
+
+懒惰计数器 = 多个局部计数器（每核一个） + 一个全局计数器，每个计数器有一个锁，所以一个n核机器的懒惰计数器有n + 1个锁
+
+主要思想：若一个核心上运行的线程增加计数器，则先增加该核的局部计数器（由局部锁同步）。同时为了保持全局计数器更新（防止某些线程需要全局计数值），局部计数器的值需要定期转移给全局计数器。此时需要该线程获得全局锁，并将全局计数器的计数值加上局部计数值，然后清零局部计数器
+
+局部计数器转全局计数器的频率：由S（sloppiness，懒惰值）决定。局部计数器的数量达到S则转入全局计数器。S越大，可扩展性越大， 但全局计数器误差也越大。
+
+<img src="./assets/image-20240515103038065.png" alt="image-20240515103038065" style="zoom:67%;" />
+
+代码实现：
+```c
+  1    typedef struct  counter_t { 
+2        int             global;            // global count 
+3        pthread_mutex_t glock;             // global lock 
+4        int             local[NUMCPUS];    // local count (per cpu) 
+5        pthread_mutex_t llock[NUMCPUS];    // ... and locks 
+6        int             threshold;         // update frequency 
+7    } counter_t; 
+8 
+9    // init: record threshold, init locks, init values 
+10   //       
+of all local counts and global count 
+11   void init(counter_t *c, int threshold) { 
+12       c->threshold = threshold; 
+13 
+14       c->global = 0; 
+15       pthread_mutex_init(&c->glock,  NULL); 
+16 
+17       int i; 
+18       for (i = 0; i < NUMCPUS; i++) { 
+19           c->local[i] = 0; 
+20           pthread_mutex_init(&c->llock[i],  NULL); 
+21       } 
+22   } 
+23 
+24   // update: usually, just grab local lock and update local amount 
+25   //        once local count has risen by 'threshold', grab global 
+26   //        lock and transfer local values to it 
+27   void update(counter_t *c, int threadID, int amt) { 
+28       pthread_mutex_lock(&c->llock[threadID]); 
+29       c->local[threadID] += amt;               // assumes amt > 0 
+30       if (c->local[threadID] >= c->threshold) { // transfer to global 
+31           pthread_mutex_lock(&c->glock); 
+32           c->global += c->local[threadID]; 
+33           pthread_mutex_unlock(&c->glock); 
+34           c->local[threadID] = 0; 
+35       } 
+36       pthread_mutex_unlock(&c->llock[threadID]); 
+37   } 
+38 
+39   // get: just return global amount (which may not be perfect) 
+40   int get(counter_t *c) { 
+41       pthread_mutex_lock(&c->glock); 
+42       int val = c->global; 
+43       pthread_mutex_unlock(&c->glock); 
+44       return val; // only approximate! 
+45   } 
+```
+
+## 29.2 并发链表
+
+并发链表需要对链表的插入，删除，查找等操作进行加锁
+
+一种简单的实现方式：
+
+`````c
+int List_Insert(list_t *L, int key) { 
+   pthread_mutex_lock(&L->lock); 
+   node_t *new = malloc(sizeof(node_t)); 
+   if (new == NULL) { 
+       perror("malloc"); 
+       pthread_mutex_unlock(&L->lock); 
+       return -1; // fail 
+   } 
+   new->key = key; 
+   new->next = L->head; 
+   L->head = new; 
+   pthread_mutex_unlock(&L->lock); 
+   return 0; // success
+}
+`````
+
+小问题：若malloc失败，需要在失败后释放锁。因此修改代码，使得只在关键部分加锁即可（malloc部分无需加锁）
+```c
+1    void List_Init(list_t *L) { 
+2        L->head = NULL; 
+3        pthread_mutex_init(&L->lock,  NULL); 
+4    } 
+5 
+6    void List_Insert(list_t *L, int key) { 
+7        // synchronization not needed 
+8        node_t *new = malloc(sizeof(node_t)); 
+9        if (new == NULL) { 
+10           perror("malloc"); 
+11           return; 
+12       } 
+13       new->key = key; 
+14 
+15       // just lock critical section 
+16       pthread_mutex_lock(&L->lock); 
+17       new->next = L->head; 
+18       L->head = new; 
+19       pthread_mutex_unlock(&L->lock); 
+20   } 
+21 
+22   int List_Lookup(list_t *L, int key) { 
+23       int rv = -1; 
+24       pthread_mutex_lock(&L->lock); 
+25       node_t *curr = L->head; 
+26       while (curr) { 
+27           if (curr->key == key) { 
+28               rv = 0; 
+29               break; 
+30           } 
+31           curr = curr->next; 
+32       } 
+33       pthread_mutex_unlock(&L->lock); 
+34       return rv; // now both success and failure 
+35   } 
+```
+
+### 扩展列表
+
+上面的实现方式会导致链表的扩展性不好。为了解决链表的扩展性问题，对链表使用**锁耦合**实现链表并发。
+
+锁耦合（hand-over-hand locking）：每个节点设置一个锁，遍历链表的时候，首先抢占下一个节点的锁，然后释放当前节点的锁
+
+缺点：获取和释放锁的开销很大，不一定比单锁的方案更快
+
+**Tips：注意控制流对锁的影响！防止锁在释放前就因为控制流异常而返回**
+
+## 29.3 并发队列
+
+Michael 和 Scott方案：
+```c
+1    typedef struct  node_t { 
+2        int                value; 
+3        struct  node_t     *next; 
+4    } node_t; 
+5 
+6    typedef struct  queue_t { 
+7        node_t            *head; 
+8        node_t            *tail; 
+9        pthread_mutex_t    headLock; 
+10       pthread_mutex_t    tailLock; 
+11   } queue_t; 
+12 
+13   void Queue_Init(queue_t *q) { 
+14       node_t *tmp = malloc(sizeof(node_t)); 
+15       tmp->next = NULL; 
+16       q->head = q->tail = tmp; 
+17       pthread_mutex_init(&q->headLock,  NULL); 
+18       pthread_mutex_init(&q->tailLock,  NULL); 
+19   } 
+20 
+21   void Queue_Enqueue(queue_t *q, int value) { 
+22       node_t *tmp = malloc(sizeof(node_t)); 
+23       assert(tmp != NULL); 
+24       tmp->value = value; 
+25       tmp->next = NULL; 
+26 
+27       pthread_mutex_lock(&q->tailLock); 
+28       q->tail->next = tmp; 
+29       q->tail = tmp; 
+30       pthread_mutex_unlock(&q->tailLock); 
+31   } 
+32 
+33   int Queue_Dequeue(queue_t *q, int *value) { 
+34       pthread_mutex_lock(&q->headLock); 
+35       node_t *tmp = q->head; 
+36       node_t *newHead = tmp->next; 
+37       if (newHead == NULL) { 
+38           pthread_mutex_unlock(&q->headLock); 
+39           return -1; // queue was empty 
+40       } 
+41       *value = newHead->value; 
+42       q->head = newHead; 
+43       pthread_mutex_unlock(&q->headLock); 
+44       free(tmp); 
+45       return 0; 
+46   } 
+```
+
+Michael 和 Scott 的并发队列解决方案设置了两个锁，一个负责队列头，一个负责队列尾。这样的设置使得入队操作和出队操作可以并发执行（两个并不冲突）
+
+设置了一个假节点（初始化代码段），分开了头和尾的操作
+
+# CH30 条件变量
+
+并发程序设计不仅仅需要锁原语，还需要条件变量。很多情况下父进程需要检查子进程是否执行结束，以决定什么时候继续执行父进程。
+
+共享变量实现条件检查的解决方案效率很低，因为需要父进程自旋检查，浪费CPU时间。在某些情况下这个解决方案甚至会出错
+
+理想的方式：让父进程休眠，直到等待的条件满足（比如子进程结束执行）
+
+## 30.1 定义和程序
+
+条件变量：本质是一个显式队列，当某些条件不满足时，线程可以加入这些等待队列以等待该条件得到满足。另外的线程改变这些条件时，可以唤醒一个或多个等待队列上等待的线程，让他们继续执行。
+
+最早由Dijkstra在“私有信号量”中提出，由Hoare命名为条件变量
+
+条件变量的声明：`pthread_cond_t c`声明c是一个条件变量。
+
+条件变量相关操作：`wait()`和`signal()`，线程睡眠调用`wait()`，线程唤醒调用`signal()`
+POSIX调用如下代码所示：
+
+```c
+pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m);  
+pthread_cond_signal(pthread_cond_t  *c); 
+1    int done = 0; 
+2    pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER; 
+3    pthread_cond_t c = PTHREAD_COND_INITIALIZER; 
+4 
+5    void thr_exit() { 
+6        Pthread_mutex_lock(&m); 
+7        done = 1; 
+8        Pthread_cond_signal(&c); 
+9        Pthread_mutex_unlock(&m); 
+10    } 
+11 
+12    void *child(void *arg) { 
+13        printf("child\n"); 
+14        thr_exit(); 
+15        return NULL; 
+16   } 
+17 
+18   void thr_join() { 
+19       Pthread_mutex_lock(&m); 
+20       while (done == 0) 
+21           Pthread_cond_wait(&c, &m); 
+22       Pthread_mutex_unlock(&m); 
+23   } 
+24 
+25   int main(int argc, char *argv[]) { 
+26       printf("parent: begin\n"); 
+27       pthread_t p; 
+28       Pthread_create(&p, NULL, child, NULL); 
+29       thr_join(); 
+30       printf("parent: end\n"); 
+31       return 0; 
+32   } 
+```
+
+**Tips：理解多线程的一个重点：父进程创建线程后的后一条语句与子进程开始同步执行，这个时刻开始考虑竞态条件**
+在上面的代码，child进程和父进程的`thr_join()`语句同步开始执行，产生两种不同运行情况，主要原因是进入child进程的`thr_exit()`和父进程的`thr_join()`的先后顺序导致的（两个函数需要竞争锁）。因此需要考虑两种情况：是父进程的`thr_join()`先进入自旋检查done，还是子进程先执行并进入`thr_exit()`？
+
+若父进程先自旋检查，会使父进程进入等待队列（此时child还未执行因此done==0）并释放锁（由wait()自动释放），由于锁可用，等待时子进程会开始执行，print child并进入`thr_exit()`函数，`thr_exit()`函数设置done为1，并调用`signal()`函数通知父进程的`wait()`函数唤醒父进程。但由于子进程未交还锁，此时父进程阻塞等待锁（父进程交由操作系统进行调度，操作系统发现锁可用会立马交锁给父进程），待子进程的锁`unlock()`后父进程从操作系统获得锁，继续执行代码，释放锁，打印父进程parent:end。
+
+若子进程先执行并进入`thr_exit()`，子进程会打印child并调用`exit()`，设置done = 1，并调用signal，但此时并无等待队列（父进程未执行），因此signal直接返回，回到exit()交还子进程锁，随后父进程获得锁，成功进入join并检查done，done = 1因此直接交还锁，打印parent:end
+
+**Tips：要保证发出信号的时候始终持有锁！包括在首次调用`wait()`和`signal()`的时候都要保证持有锁**
+
+## 30.2 生产者/消费者（有界缓冲区）问题
+
+Dijkstra通过研究这个问题，提出了用于锁和条件变量的信号量
+
+生产者/消费者问题：一个或多个生产者线程和消费者线程，生产者把生成的数据放入有界缓冲区，消费者从缓冲区取走数据，以某种方式消费
+
+有界缓冲区：共享资源，需要通过同步机制访问，以免产生竞态条件
+
+两种不同的信号释义：
+
+1. Mesa语义：发信号给线程只是唤醒线程，暗示状态发生变化，但不会保证在该线程运行之前状态一直是期望的情况
+2.  Hoare语义：会保证被唤醒的线程立刻执行
+
+几乎所有操作系统采用的是Mesa语义，Mesa语义告诉我们：**总是使用while循环**
+
+### 单值缓冲区的生产者/消费者方案
+
+核心思想：设置两个条件变量`fill`和`empty`，防止出现消费者唤醒消费者导致所有线程都睡眠的情况。消费者线程等待`fill`条件变量，发信号给`empty`条件变量；生产者线程等待`empty`条件变量，等待`fill`条件变量
+
+代码实现：
+```c
+1    cond_t empty, fill; 
+2    mutex_t mutex; 
+3 
+4    void *producer(void *arg) { 
+5        int i; 
+6        for (i = 0; i < loops; i++) { 
+7            Pthread_mutex_lock(&mutex); 
+8            while (count == 1) 
+9                Pthread_cond_wait(&empty,  &mutex); 
+10           put(i); 
+11           Pthread_cond_signal(&fill); 
+12           Pthread_mutex_unlock(&mutex); 
+13       } 
+14   } 
+15 
+16   void *consumer(void *arg) { 
+17       int i; 
+18       for (i = 0; i < loops; i++) { 
+19           Pthread_mutex_lock(&mutex); 
+20           while (count == 0) 
+21               Pthread_cond_wait(&fill, &mutex); 
+22           int tmp = get(); 
+23           Pthread_cond_signal(&empty); 
+24           Pthread_mutex_unlock(&mutex); 
+25           printf("%d\n", tmp); 
+26       } 
+27   } 
+```
+
+### Ultimate Scheme
+
+需要提高方案的并发和效率。具体来说，增加更多缓冲区槽位（可以存储更多数据），在睡眠之前存储和消费更多的值。
+
+改进的`put()`和`get()`方法：
+
+```c
+1    int buffer[MAX]; 
+2    int fill = 0; 
+3    int use   = 0; 
+4    int count = 0; 
+5 
+6    void put(int value) { 
+7        buffer[fill] = value; 
+8        fill = (fill + 1) % MAX; 
+9        count++; 
+10   } 
+11 
+12   int get() { 
+13       int tmp = buffer[use]; 
+14       use = (use + 1) % MAX; 
+15       count--; 
+16       return tmp; 
+17   } 
+```
+
+改进的并发生产消费代码：
+```c
+1    cond_t empty, fill; 
+2    mutex_t mutex; 
+3 
+4    void *producer(void *arg) { 
+5        int i; 
+6        for (i = 0; i < loops; i++) { 
+7            Pthread_mutex_lock(&mutex);			// p1            
+8            while (count == MAX)					// p2   
+9                Pthread_cond_wait(&empty, &mutex);	// p3
+10           put(i);								// p4
+11           Pthread_cond_signal(&fill);			// p5
+12           Pthread_mutex_unlock(&mutex);			// p6
+13       } 
+14   } 
+15 
+16   void *consumer(void *arg) { 
+17       int i; 
+18       for (i = 0; i < loops; i++) { 
+19           Pthread_mutex_lock(&mutex);			// c1       
+20           while (count == 0)                     // c2
+21               Pthread_cond_wait(&fill, &mutex);  // c3
+22           int tmp = get();                       // c4
+23           Pthread_cond_signal(&empty);           // c5
+24           Pthread_mutex_unlock(&mutex);          // c6
+25           printf("%d\n", tmp); 
+26       } 
+27   } 
+```
+
+Tips：多线程程序在检查条件变量时，记得总是使用while循环，而不是if单次检查
+
+## 30.3 覆盖条件
+
+在有很多个等待线程，但是需要唤醒特定线程的场景下，需要用到覆盖条件变量唤醒`pthread_cond_broadcast()`唤醒所有线程，而不是`pthread_cond_signal()`只唤醒由操作系统调度的某个特定线程。这样可以保证需要的线程一定会被唤醒
+
+这是一种保守策略，因此成本会很大（太多线程被唤醒）
+
+比如在多线程内存分配问题当中，广播机制就是一种有效的唤醒方式。多线程内存分配的消费者是`allocate()`函数，生产者是`free()`函数，在`free()`之后，如果不采用广播方式，没有办法唤醒需要足够内存的线程
+
+代码示例：（22行不能正常工作，需要替换成`Pthread_cond_broadcast(&c)`）
+
+```c
+1    // how many bytes of the heap are free? 
+2    int bytesLeft = MAX_HEAP_SIZE; 
+3 
+4    // need lock and condition too 
+5    cond_t c; 
+6    mutex_t m; 
+7 
+8    void * 
+9    allocate(int size) { 
+10       Pthread_mutex_lock(&m); 
+11       while (bytesLeft < size) 
+12           Pthread_cond_wait(&c, &m); 
+13       void *ptr = ...; // get mem from heap 
+14       bytesLeft -= size; 
+15       Pthread_mutex_unlock(&m); 
+16       return ptr; 
+17   } 
+18 
+19   void free(void *ptr, int size) { 
+20       Pthread_mutex_lock(&m); 
+21       bytesLeft += size; 
+22       Pthread_cond_signal(&c); // whom to signal?? 
+23       Pthread_mutex_unlock(&m); 
+24   } 
+```
+
+# CH31 信号量
+
+由Dijkstra发明，是用于同步有关的所有工作的唯一原语，可以用于使用锁和条件变量
+
+## 31.1 信号量的定义
+
+信号量：有一个整数值的对象，可以用两个函数来操作。在POSIX标准中两个函数分别为`sem_wait()`和`sem_post()`
+
+初始化：由于信号量的初始值会决定多线程程序的行为，因此需要初始化信号量
+```c
+1    #include <semaphore.h> 
+2    sem_t s; 
+3    sem_init(&s, 0, 1); 
+```
+
+上面的代码声明了一个信号量s，通过第三个参数，将s的值初始化为1。第二个参数为0，表示信号量在同一个进程中共享。若需要用于跨不同进程的同步访问，则需要改变第二个参数的值。
+
+`sem_wait()`和`sem_post()`的定义：
+
+```c
+1    int sem_wait(sem_t *s) { 
+2        decrement the value of semaphore s by one 
+3        wait if value of semaphore s is negative 
+4    } 
+5 
+6    int sem_post(sem_t *s) { 
+7        increment the value of semaphore s by one 
+8        if there are one or more threads waiting, wake one 
+9    } 
+```
+
+`sem_wait()`：调用首先将信号量自减1，若减1后，信号量的值非负，则返回，否则（信号量为负）让调用的线程挂起，直到后面的一个`sem_post()`操作。若有多个线程调用`sem_wait()`，它们都在队列中等待被唤醒
+总结：进行某些操作（信号量自减）后，满足某些条件（非负），则直接返回，否则挂起线程（让线程阻塞休眠）
+
+`sem_post()`：直接增加信号量的值，且若有等待线程，唤醒其中一个
+总结：进行某些操作后（信号量自增），唤醒信号量上等待的线程
+
+若信号量值为负数，则这个值的绝对值就是等待线程的个数
+
+## 31.2 二值信号量：锁
+
+锁只有两个状态（持有和没持有），因此这种用法叫做二值信号量（binary semaphore）
+
+二值信号量的应用：
+```c
+1    sem_t m; 
+2    sem_init(&m, 0, 1); // initialize semaphore to X; what should X be? 
+3 
+4    sem_wait(&m); 
+5    // critical section here 
+6    sem_post(&m); 
+```
+
+临界区用`sem_wait()`和`sem_post()`包围，起到了锁的作用。初始化信号量的时候，初始值应该设置为1
+
+<img src="./assets/image-20240520110409202.png" alt="image-20240520110409202" style="zoom: 67%;" />
+
+## 31.3 信号量用作条件变量
+
+使用场景：一个线程需要等待一个链表非空，然后删除一个元素
+
+代码示例：
+```c
+1    sem_t s; 
+2 
+3    void * 
+4    child(void *arg) { 
+5        printf("child\n"); 
+6        sem_post(&s); // signal here: child is done 
+7        return NULL; 
+8    } 
+9 
+10   int 
+11   main(int argc, char *argv[]) { 
+12       sem_init(&s, 0, 0); // what should X be? 
+13       printf("parent: begin\n"); 
+14       pthread_t c; 
+15       Pthread_create(c, NULL, child, NULL); 
+16       sem_wait(&s); // wait here for child 
+17       printf("parent: end\n"); 
+18       return 0; 
+19   } 
+```
+
+信号量的初始值应该初始化为0，保证当父进程先执行wait的时候会进入休眠等待子进程执行。
+
+场景一：父进程先执行`sem_wait()`：
+
+![image-20240520111644928](./assets/image-20240520111644928.png)
+
+场景二：子进程先执行`sem_post()`：
+
+![image-20240520111741926](./assets/image-20240520111741926.png)
+
+## 31.4 信号量：生产者/消费者问题
+
+核心：两个信号量`empty`和`full`，生产者在`empty`上等待（empty时需要唤醒），向`full`发信号（full时需要唤醒消费者进行消费）
+
+**注意：不仅需要考虑生产者和消费者的锁（即生产者和消费者只能有一个角色在操作缓冲区），还需要考虑多个生产者（消费者）同时对缓冲区的下标和数据操作时的冲突，所以需要两层锁**
+
+第一层锁：生产者/消费者锁（empty/full信号量），保证同一时间只有生产者/消费者在占用缓冲区
+第二层锁：缓冲区锁（互斥量），保证同一时间增加缓冲区索引和向缓冲区加入元素是互斥操作
+
+初次尝试的两层锁代码：
+```c
+sem_t empty; 
+sem_t full; 
+sem_t mutex; 
+
+void *producer(void *arg) { 
+    int i; 
+    for (i = 0; i < loops; i++) { 
+        sem_wait(&mutex);        // p0
+        sem_wait(&empty);        // p1
+       put(i);                   // p2
+       sem_post(&full);          // p3
+       sem_post(&mutex);         // p4
+   } 
+} 
+
+void *consumer(void *arg) { 
+   int i; 
+   for (i = 0; i < loops; i++) { 
+       sem_wait(&mutex);        // c0
+       sem_wait(&full);         // c1
+       int tmp = get();         // c2
+       sem_post(&empty);        // c3
+       sem_post(&mutex);        // c4
+       printf("%d\n", tmp);     
+   } 
+} 
+
+int main(int argc, char *argv[]) { 
+   // ... 
+   sem_init(&empty, 0, MAX); // MAX buffers are empty to begin with... 
+   sem_init(&full, 0, 0);    // ... and 0 are full 
+   sem_init(&mutex, 0, 1);    // mutex=1 because it is a lock (NEW LINE) 
+   // ... 
+} 
+```
+
+上面的代码存在问题，会导致**死锁**，生产者和消费者会互相等待对方释放锁。
+
+死锁：一组线程互相等待对方释放它们需要的锁，导致这些线程都无法继续执行。每个线程都持有某个锁，同时等待其他线程释放它所需要的锁，从而形成一个循环等待的状态。
+
+死锁的四个条件：
+
+1. 互斥条件：存在互斥锁，保护某些临界区内容不被多个线程同时占用（比如上面代码中的mutex锁）
+2. 持有并等待条件：一个线程持有至少一个锁，并且正在等待获取其他锁，这些锁正在被其他线程持有
+3. 不可抢占条件：线程持有的锁在线程主动释放之前不能被其他线程强制抢夺，只能由持有的线程自行主动释放
+4. 循环等待条件：存在一个线程等待环，每个线程都在等待另一个线程所持有的锁，而这另一个线程也在等待其他线程的锁释放
+
+上面的代码可能会出现的情况：若消费者先执行，可能会出现执行到`sem_wait(&full)`并进入full队列等待生产者生产内容（此时消费者持有mutex锁），而随后生产者在`sem_wait(&mutex)`中进入等待队列（消费者持有mutex），无法增加内容并呼叫full队列。因此需要改变互斥锁的位置以防止死锁现象的发生。
+
+以下是改进后的代码：
+```c
+1    sem_t empty; 
+2    sem_t full; 
+3    sem_t mutex; 
+4 
+5    void *producer(void *arg) { 
+6        int i; 
+7        for (i = 0; i < loops; i++) { 
+8            sem_wait(&empty);         
+9            sem_wait(&mutex);         
+10           put(i);                   
+11           sem_post(&mutex);         
+12           sem_post(&full);          
+13       } 
+14   } 
+15 
+16   void *consumer(void *arg) { 
+17       int i; 
+18       for (i = 0; i < loops; i++) { 
+19           sem_wait(&full);          
+20           sem_wait(&mutex);         
+21           int tmp = get();          
+22           sem_post(&mutex);         
+23           sem_post(&empty);         
+24           printf("%d\n", tmp); 
+25       } 
+26   } 
+27 
+28   int main(int argc, char *argv[]) { 
+29       // ... 
+30       
+31   sem_init(&empty, 0, MAX);  // MAX buffers are empty to begin with... 
+31       sem_init(&full, 0, 0);     // ... and 0 are full 
+32       sem_init(&mutex, 0, 1);    // mutex=1 because it is a lock 
+33       // ... 
+34   } 
+```
+
+## 31.5 读者/写者锁（Reader-Writer Mutex）
+
+这种锁是为了适应更灵活的锁定原语而发明的。针对类似并发链表的插入和查找操作，只有插入的时候会修改链表的状态（需要传统临界区），而查找操作只是读取结构，因此可以随意并发执行多个查找操作。读取线程只需要和写入线程竞争锁，读取线程之间并不需要同步锁。
+
+一种简单的读者/写者锁的实现：
+
+```c
+1    typedef struct _rwlock_t { 
+2      sem_t lock;      // binary semaphore (basic lock) 
+3      sem_t writelock; // used to allow ONE writer or MANY readers 
+4      int    readers;  // count of readers reading in critical section 
+5    } rwlock_t; 
+6 
+7    void rwlock_init(rwlock_t *rw) { 
+8      rw->readers = 0; 
+9      sem_init(&rw->lock, 0, 1); 
+10     sem_init(&rw->writelock, 0, 1); 
+11   } 
+12 
+13   void rwlock_acquire_readlock(rwlock_t *rw) { 
+14     sem_wait(&rw->lock); 
+15     rw->readers++; 
+16     if (rw->readers == 1) 
+17       sem_wait(&rw->writelock); // first reader acquires writelock 
+18     sem_post(&rw->lock); 
+19   } 
+20 
+21   void rwlock_release_readlock(rwlock_t *rw) { 
+22     sem_wait(&rw->lock); 
+23     rw->readers--; 
+24     if (rw->readers == 0) 
+25       sem_post(&rw->writelock); // last reader releases writelock 
+26     sem_post(&rw->lock); 
+27   } 
+28 
+29   void rwlock_acquire_writelock(rwlock_t *rw) { 
+30     sem_wait(&rw->writelock); 
+31   } 
+32 
+33   void rwlock_release_writelock(rwlock_t *rw) { 
+34     sem_post(&rw->writelock); 
+35   } 
+```
+
+两种不同的锁的功能：
+
+1. `lock`锁：保证`readers`变量的修改是原子的，不会有同时两个读取线程修改readers的值。本质是reader锁
+2. `writelock`锁：保证写入线程写入内容的时候的写入操作是原子的，不会有多个写入线程同时写入同一个数据结构导致混乱
+
+读取锁的本质：先获得`lock`锁，以修改readers变量的值，随后获得`writelock`锁，保证此时没有写入线程正在进行写入操作，最后释放`lock`锁。`lock`锁必须最后释放，保证在修改reader值后，这个读取线程一定读取成功了，而不会出现reader增加，但是跳到另一个读取线程读取另外的数据的情况（这种情况下reader的值错误的多加1，因为第一个读取线程没有成功读取）
+
+上面的方法具有缺陷：读者可能会饿死写者
+
+### Hill定律：简单的本办法可能更好
+
+某些时候，简单的本办法可能是最好的，简单的自旋锁反而可能是最有效的，因为容易实现且高效。复杂的办法可能意味着更慢。
+
+这个定律由Mark Hill在他的学位论文中提出。
+
+## 31.6 哲学家就餐问题
+
+是一个著名的并发问题，由Dijkstra提出并解决。（但这并不是一个实用的问题）
+
+ 问题基本情况：五个哲学家围成圈，每两个哲学家之间放置一个叉子，每个哲学家有两个状态，第一个状态是思考，这个时候他放下他所有的叉子并什么都不做；另一个状态是就餐，这个时候他同时拿起左和右侧的叉子并就餐。
+
+<img src="./assets/image-20240520225651754.png" alt="image-20240520225651754" style="zoom: 67%;" />
+
+每个哲学家的基本循环：
+```c
+while (1) { 
+	think();  
+	getforks();  
+  	eat();  
+  	putforks(); 
+}
+```
+
+辅助函数（取叉函数）：
+```c
+int left(int p) { return p; } 
+int right(int p) { return (p + 1) % 5; } 
+```
+
+`left(p)`函数取走哲学家p左侧的勺子，`right()`函数取走哲学家p右侧的勺子（考虑进位）
+
+在哲学家就餐问题当中，需要给每个叉子分配一个信号量以解决问题`sem_t forks[5]`
+
+### 可能导致死锁的方案：
+
+```c
+1    void getforks() { 
+2      sem_wait(forks[left(p)]); 
+3      sem_wait(forks[right(p)]); 
+4    } 
+5 
+6    void putforks() { 
+7      sem_post(forks[left(p)]); 
+8      sem_post(forks[right(p)]); 
+9  } 
+```
+
+导致死锁的原因：若五个哲学家同时拿起每个人左侧的叉子，此时五个哲学家同时等待其他哲学家释放右侧的勺子，导致死锁。
+
+### 一种解决死锁的方案：
+
+修改某个或某一些哲学家的取叉顺序。在Dijkstra方案中，假定哲学家4的取叉顺序不同（先右再左）
+```c
+1    void getforks() { 
+2      if (p == 4) { 
+3        sem_wait(forks[right(p)]); 
+4        sem_wait(forks[left(p)]); 
+5      } else { 
+6        sem_wait(forks[left(p)]); 
+7        sem_wait(forks[right(p)]); 
+8      } 
+9    } 
+```
+
+此时哲学家4左边的哲学家一定可以获得两个叉子，因此可以退出循环等待条件，避免死锁的发生
+
+其他类似的问题：吸烟者问题，理发师问题
+
+## 31.7 信号量的实现
+
+我们可以使用最底层的同步原语（锁和条件变量）实现信号量
+
+代码实现：
+```c
+1    typedef struct  _Zem_t { 
+2        int value; 
+3        pthread_cond_t cond; 
+4        pthread_mutex_t lock; 
+5    } Zem_t; 
+6 
+7    // only one thread can call this 
+8    void Zem_init(Zem_t *s, int value) { 
+9        s->value = value; 
+10       Cond_init(&s->cond); 
+11       Mutex_init(&s->lock); 
+12   } 
+13 
+14   void Zem_wait(Zem_t *s) { 
+15       Mutex_lock(&s->lock); 
+16       while (s->value <= 0) 
+17           Cond_wait(&s->cond, &s->lock); 
+18       s->value--; 
+19       Mutex_unlock(&s->lock); 
+20   } 
+21 
+22   void Zem_post(Zem_t *s) { 
+23       Mutex_lock(&s->lock); 
+24       s->value++; 
+25       Cond_signal(&s->cond); 
+26       Mutex_unlock(&s->lock); 
+27   } 
+```
+
+# CH32 常见并发问题
+
+## 32.2 非死锁缺陷
+
+主要原因：
+
+1. 违反原子性缺陷
+2. 错误顺序缺陷
+
+### （1）违反原子性缺陷
+
+MySQL中的违反原子性缺陷：
+```c
+1    Thread 1:: 
+2    if (thd->proc_info) { 
+3      ... 
+4      fputs(thd->proc_info, ...); 
+5      ... 
+6    } 
+7 
+8    Thread 2:: 
+9    thd->proc_info = NULL; 
+```
+
+若线程1在检查`proc_info`非空后被中断，并执行线程2，会导致检查失效，线程1引用空指针导致程序崩溃
+
+违反原子性的定义：代码段的本意需要原子执行，但在实际执行中没有强制实现原子性。即违反了多次内存访问中预期的可串行性。在上面的代码中，线程1的`proc_info`非空检查和输出两个操作应该是串行（原子）地执行的，但是并没有强制串行地执行。
+
+解决方案：给应该原子执行但并没有原子执行的代码部分加锁（给共享变量访问加锁）。
+```c
+1    pthread_mutex_t proc_info_lock = PTHREAD_MUTEX_INITIALIZER; 
+2 
+3    Thread 1:: 
+4    pthread_mutex_lock(&proc_info_lock); 
+5    if (thd->proc_info) { 
+6      ... 
+7      fputs(thd->proc_info, ...); 
+8      ... 
+9    } 
+10    pthread_mutex_unlock(&proc_info_lock); 
+11 
+12   Thread 2:: 
+13   pthread_mutex_lock(&proc_info_lock); 
+14   thd->proc_info = NULL; 
+15   pthread_mutex_unlock(&proc_info_lock); 
+```
+
+### （2）违反顺序缺陷
+
+定义：两个内存访问的预期顺序被打破了（即A应该在B之前执行，但是实际运行中却不是这个顺序）
+
+下面的代码就出现了违反顺序缺陷：
+```c
+1    Thread 1:: 
+2    void init() { 
+3        ... 
+4        mThread = PR_CreateThread(mMain, ...); 
+5        ... 
+6    } 
+7 
+8    Thread 2:: 
+9    void mMain(...) { 
+10       ... 
+11       mState = mThread->State; 
+12       ... 
+13   } 
+```
+
+线程2假设变量`mThread`已经被初始化，然而这种假设的访问顺序很有可能会被打破。
+
+解决方案：通过强制顺序来修复，这里可以借助锁和条件变量。
+```c
+1    pthread_mutex_t mtLock = PTHREAD_MUTEX_INITIALIZER; 
+2    pthread_cond_t mtCond = PTHREAD_COND_INITIALIZER; 
+3    int mtInit            = 0; 
+4 
+5    Thread 1:: 
+6    void init() { 
+7       ... 
+8       mThread = PR_CreateThread(mMain, ...); 
+9 
+10      // signal that the thread has been created... 
+11      pthread_mutex_lock(&mtLock); 
+12      mtInit = 1; 
+13      pthread_cond_signal(&mtCond); 
+14      pthread_mutex_unlock(&mtLock); 
+15      ... 
+16   } 
+17 
+18   Thread 2:: 
+19   void mMain(...) { 
+20      ... 
+21      // wait for the thread to be initialized... 
+22      pthread_mutex_lock(&mtLock); 
+23      while (mtInit == 0) 
+24          pthread_cond_wait(&mtCond,  &mtLock); 
+25      pthread_mutex_unlock(&mtLock); 
+26 
+27      mState = mThread->State; 
+28      ... 
+29   } 
+```
+
+`mtLock`：用于确保`mtInit`的修改是原子的
+`mtCond`：用于线程1和线程2的交流，若线程1完成对变量的初始化，则通过`mtCond`来唤醒线程2
+
+## 32.3 死锁缺陷
+
+下面的经典代码片段可能会产生死锁问题：
+```c
+Thread 1:    Thread 2: 
+lock(L1);    lock(L2); 
+lock(L2);    lock(L1); 
+```
+
+但是不一定，只有当线程1占有锁L1，此时切换到线程2，线程2占有锁L2，并试图占有锁L1的时候，才会发生死锁。
+
+<img src="./assets/image-20240521162010482.png" alt="image-20240521162010482" style="zoom:67%;" />
+
+导致死锁的一些原因：
+
+1. 大型代码库的复杂依赖
+2. 模块封装（某些看起来没有关系的接口可能导致死锁）
+
+### 死锁产生的条件
+
+1. **互斥**：线程对于需要的资源（比如某个锁）进行互斥的访问（只有一个线程可以获取这个资源）
+2. **持有并等待**：线程持有了资源（比如成功抢占了某个锁），并且同时在等待其他资源
+3. **非抢占**：所有线程获得的资源，除非线程主动放弃，否则不会被其他线程所占有
+4. **循环等待**：线程之间存在环路，环路上每个线程都持有额外的资源，而这个资源又被另一个线程所申请，这种关系链需要可以连接成环路
+
+### 死锁的预防
+
+#### （1）破坏循环等待条件
+
+全序方法（total ordering）：提供一个全局统一的锁获取顺序。在有两个锁L1和L2的情况下，确保每个线程都先申请占有锁L1再申请占有锁L2即可避免死锁的发生。
+
+偏序方法（partial ordering）：确认一个锁的优先级，并且全局依照这个优先级进行锁的申请
+
+如果不想单独设置锁的顺序，还可以**直接使用锁的地址来强制锁的顺序**，比如按照地址从高到低进行加锁
+
+锁地址决定锁顺序代码实现：
+```c
+if (m1 > m2) { // grab locks in high-to-low address order  
+  	pthread_mutex_lock(m1); 
+  	pthread_mutex_lock(m2); 
+} else {  
+  	pthread_mutex_lock(m2);  
+  	pthread_mutex_lock(m1);
+} 
+// Code assumes that m1 != m2 (it is not the same lock) 
+```
+
+#### （2）破坏持有并等待条件
+
+死锁的持有并等待条件可以通过原子地抢占锁来避免。即所有抢锁环节通过一个全局锁进行包装
+
+代码实现：
+```c
+1    lock(prevention); 
+2    lock(L1); 
+3    lock(L2); 
+4    ... 
+5    unlock(prevention);
+```
+
+在这段代码中，所有程序中涉及的锁的抢占都用`prevention`锁进行包装。
+
+这种方案并不适合封装，因为加全局锁的方案需要事先准确知道所有需要抢的锁，并且全局锁会导致所有需要的锁同时被一个线程所抢占，而不是在这个线程真正需要使用的时候被抢占，因此可能会降低并发
+
+#### （3）破坏非抢占条件
+
+破坏非抢占条件只需要持有锁的线程周期性放弃自己的锁，并周期性重新获得锁即可。这样可以保证线程在死锁时可以主动解除导致死锁发生的任意一个锁。利用`trylock()`方法，尝试获得锁，但在不获得锁时不会挂起而是马上返回-1，表示锁已经被占有。
+
+代码实现：
+```c
+1    top: 
+2      lock(L1); 
+3      if (trylock(L2) == -1) { 
+4        unlock(L1); 
+5        goto top; 
+6    } 
+```
+
+但是有可能导致**活锁**，即两个线程同时重复这样一个操作，但是又互相不占有锁。解决方法：循环结束的时候随机等待一个时间，在重复动作，以降低线程之间的重复干扰。
+
+`trylock()`方案的缺点：不好封装，如果代码涉及的一个锁是封装在某个函数内的，则`goto`的操作并不好实现。
+
+#### （4）避免互斥
+
+通过更强大的硬件指令，构造出不需要锁的数据结构。
+
+#### （5）通过调度避免死锁
+
+若提前预知线程T1和T2都需要使用锁L1和L2，则只要让T1和T2不同时运行即可避免死锁。
+
+#### （6）银行家算法
+
+由Dijkstra提出，其实质是不让系统在动态分配资源后进入不安全状态，而是保持在安全状态
+
+安全状态：存在一个资源分配的线程序列，可以保证操作系统能够按顺序为每个线程分配所需的资源直至线程所要求的最大需求。
+
+不安全状态：不存在任何一个上面提到的线程序列
+
+安全状态一定可以避免死锁（破坏了循环并等待条件，存在序列可以成功分配所有资源），而不安全状态可能会导致死锁。
+
+**银行家算法的本质：**每当线程提出资源请求，系统判断满足此次资源请求后系统状态是否可以满足安全状态，若可以则进行资源分配，若不可以则拒绝分配，而申请资源的该线程会被阻塞
+
+**使用银行家算法的前提条件：**进程预先提出自己的最大资源请求，并假设系统拥有固定的资源总量
+
+#### （6）检查并恢复策略
+
+这种策略允许死锁偶尔发生，并且可以主动检查到死锁并采取行动
+
+**Tom West定律：不要总是追求完美。**如果坏事很少发生，并且造成很小的影响，那么不应该花大量的时间去预防
+
+# CH33 基于事件的并发
+
